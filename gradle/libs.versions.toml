@@ -1,0 +1,26 @@
+# gradle/libs.versions.toml  — REPLACE EVERYTHING WITH THIS
+
+[versions]
+agp = "8.5.2"
+kotlin = "2.0.0"
+compose-bom = "2024.09.02"
+androidx-core-ktx = "1.13.1"
+appcompat = "1.7.0"
+material = "1.12.0"
+junit = "4.13.2"
+androidx-junit = "1.1.5"
+espresso-core = "3.5.1"
+
+[libraries]
+androidx-core-ktx = { module = "androidx.core:core-ktx", version.ref = "androidx-core-ktx" }
+androidx-appcompat = { module = "androidx.appcompat:appcompat", version.ref = "appcompat" }
+material = { module = "com.google.android.material:material", version.ref = "material" }
+junit = { module = "junit:junit", version.ref = "junit" }
+androidx-junit = { module = "androidx.test.ext:junit", version.ref = "androidx-junit" }
+androidx-espresso-core = { module = "androidx.test.espresso:espresso-core", version.ref = "espresso-core" }
+compose-bom = { module = "androidx.compose:compose-bom", version.ref = "compose-bom" }
+
+[plugins]
+android-application = { id = "com.android.application", version.ref = "agp" }
+kotlin-android = { id = "org.jetbrains.kotlin.android", version.ref = "kotlin" }
+kotlin-compose = { id = "org.jetbrains.kotlin.plugin.compose", version.ref = "kotlin" }
