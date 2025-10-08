@@ -149,7 +149,7 @@ If hardware outputs pre‑filtered data, keep filters consistent—render path i
 3. In‑app:
 
    * Tap **Start Demo** to validate rendering and exports
-   * Tap **Connect BLE** when your hardware is ready
+   * Tap **Connect BLE** when your hardware is available
 
 ---
 
