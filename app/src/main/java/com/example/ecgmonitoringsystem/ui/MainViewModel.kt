@@ -4,19 +4,17 @@ import android.app.Application
 import android.bluetooth.BluetoothDevice
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
-import com.example.ecgmonitoringsystem.ble.EcgBleManager
 import com.example.ecgmonitoringsystem.data.DemoEcgSource
 import com.example.ecgmonitoringsystem.domain.model.EcgFrame
-import com.example.ecgmonitoringsystem.domain.model.parseEcgPacket
+// If you later add BLE manager, keep it optional and off in demo
+// import com.example.ecgmonitoringsystem.ble.EcgBleManager
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
 class MainViewModel(app: Application) : AndroidViewModel(app) {
-    // BLE path
-    private val mgr = EcgBleManager(app)
 
-    // Demo path
+    // private val ble = EcgBleManager(app) // keep out of the way for demo
     private val demo = DemoEcgSource(viewModelScope)
 
     private val _frame = MutableStateFlow<EcgFrame?>(null)
@@ -24,6 +22,7 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
 
     private val _hr = MutableStateFlow(0)
     val hr = _hr.asStateFlow()
+
     private val _sqi = MutableStateFlow(0)
     val sqi = _sqi.asStateFlow()
 
@@ -34,7 +33,6 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         _demoMode.value = on
         if (on) {
             demo.start()
-            // Bridge demo flows to UI state
             viewModelScope.launch { demo.frame.collect { _frame.value = it } }
             viewModelScope.launch { demo.hr.collect { _hr.value = it } }
             viewModelScope.launch { demo.sqi.collect { _sqi.value = it } }
@@ -43,20 +41,16 @@ class MainViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    // BLE connect & stream
-    fun connect(device: BluetoothDevice) {
-        _demoMode.value = false
-        mgr.connect(device).retry(3, 100).enqueue()
-        viewModelScope.launch {
-            mgr.ecgFramesFlow.collect { _frame.value = parseEcgPacket(it) }
+    fun startStream(start: Boolean, notch50: Boolean) {
+        if (_demoMode.value) {
+            if (start) demo.start() else demo.stop()
+            return
         }
-        viewModelScope.launch {
-            mgr.hrFlow.collect { (h, s) -> _hr.value = h; _sqi.value = s }
-        }
+        // BLE path would go here later
     }
 
-    fun startStream(start: Boolean, notch50: Boolean) {
-        if (!_demoMode.value) mgr.startStream(start, notch50)
-        else if (!start) demo.stop() else demo.start()
+    fun connect(device: BluetoothDevice) {
+        _demoMode.value = false
+        // ble.connect(device)...
     }
 }

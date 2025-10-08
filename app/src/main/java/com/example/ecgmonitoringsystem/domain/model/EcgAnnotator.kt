@@ -1,64 +1,105 @@
 package com.example.ecgmonitoringsystem.domain.model
 
-data class EcgFeatures(
-    val qrsIdx: IntArray,
-    val pIdx: IntArray,
-    val tIdx: IntArray
-)
+import kotlin.math.abs
+import kotlin.math.max
+import kotlin.math.min
 
-/**
- * Ultra-light detector good enough for MVP/demo:
- * - QRS: absolute threshold + refractory.
- * - P/T: local extrema in windows before/after QRS.
- * Tune THR_QRS and windows once you see real signals.
- */
 object EcgAnnotator {
-    fun detect(samples: ShortArray, fs: Int): EcgFeatures {
-        val n = samples.size
-        val abs = IntArray(n) { kotlin.math.abs(samples[it].toInt()) }
 
-        // --- QRS detection ---
-        // dynamic threshold: median(abs) * factor
-        val sorted = abs.copyOf().apply { sort() }
-        val median = sorted[n / 2].coerceAtLeast(1)
-        val THR_QRS = (median * 3.0).toInt()  // start aggressive for demo
-        val refractory = (0.22 * fs).toInt()  // 220 ms
+    /**
+     * Minimal QRS(P/T) estimator.
+     * - Input: short units (1 mV = 1000)
+     * - Output indices relative to the provided array
+     */
+    fun detect(x: ShortArray, fs: Int, flags: Int = 0): EcgFeatures {
+        if (x.isEmpty() || fs <= 0) return EcgFeatures()
 
-        val qrs = ArrayList<Int>()
-        var last = -refractory
-        for (i in 1 until n - 1) {
-            if (abs[i] > THR_QRS && i - last > refractory && abs[i] >= abs[i - 1] && abs[i] >= abs[i + 1]) {
-                qrs.add(i); last = i
-            }
-        }
+        // 1) Convert to float (mV)
+        val f = FloatArray(x.size) { x[it] / 1000f }
 
-        // --- P/T rough pick ---
+        // 2) Center & scale by MAD-like
+        val mean = f.average().toFloat()
+        for (i in f.indices) f[i] -= mean
+        val absMean = f.sumOf { abs(it).toDouble() }.toFloat() / f.size
+        val scale = if (absMean > 1e-6f) (1f / (absMean * 1.253f)) else 1f
+        for (i in f.indices) f[i] *= scale
+
+        // 3) Derivative + rectify + smooth (simple envelope)
+        val der = FloatArray(f.size)
+        for (i in 1 until f.size) der[i] = f[i] - f[i - 1]
+        for (i in der.indices) der[i] = abs(der[i])
+
+        val w = max(3, fs / 40)         // ~25ms
+        val env = movingAvg(der, w)
+
+        // 4) Adaptive threshold + refractory to get R-peaks
+        val thr = adaptiveThreshold(env, win = fs / 2) // ~0.5 s window
+        val rIdx = pickPeaks(env, thr, refr = (0.22f * fs).toInt().coerceAtLeast(1))
+
+        // For demo: P/T as offsets around R (very rough)
         val pList = ArrayList<Int>()
         val tList = ArrayList<Int>()
-        val preWin = (0.12 * fs).toInt()   // 120 ms before QRS
-        val postWin = (0.20 * fs).toInt()  // 200 ms after QRS
-
-        for (r in qrs) {
-            val pStart = (r - preWin).coerceAtLeast(1)
-            val pEnd   = (r - (preWin / 2)).coerceAtLeast(2)
-            val tStart = (r + (postWin / 2)).coerceAtMost(n - 2)
-            val tEnd   = (r + postWin).coerceAtMost(n - 2)
-
-            // P: local max abs in [pStart, pEnd)
-            var pIdx = pStart
-            for (i in pStart until pEnd) if (abs[i] > abs[pIdx]) pIdx = i
-            pList.add(pIdx)
-
-            // T: local max abs in [tStart, tEnd)
-            var tIdx = tStart
-            for (i in tStart until tEnd) if (abs[i] > abs[tIdx]) tIdx = i
-            tList.add(tIdx)
+        for (r in rIdx) {
+            val p = r - (0.16f * fs).toInt()
+            val t = r + (0.20f * fs).toInt()
+            if (p in f.indices) pList.add(p)
+            if (t in f.indices) tList.add(t)
         }
 
         return EcgFeatures(
-            qrsIdx = qrs.toIntArray(),
+            qrsIdx = rIdx,
             pIdx = pList.toIntArray(),
             tIdx = tList.toIntArray()
         )
+    }
+
+    private fun movingAvg(src: FloatArray, w: Int): FloatArray {
+        if (w <= 1) return src.copyOf()
+        val dst = FloatArray(src.size)
+        var sum = 0f
+        var k = 0
+        for (i in src.indices) {
+            sum += src[i]
+            k++
+            if (k > w) {
+                sum -= src[i - w]
+                k = w
+            }
+            dst[i] = sum / k
+        }
+        return dst
+    }
+
+    private fun adaptiveThreshold(env: FloatArray, win: Int): FloatArray {
+        val dst = FloatArray(env.size)
+        val w = max(4, win)
+        var run = 0f
+        var k = 0
+        for (i in env.indices) {
+            run += env[i]
+            k++
+            if (k > w) {
+                run -= env[i - w]
+                k = w
+            }
+            dst[i] = (run / k) * 1.5f // 1.5× local mean
+        }
+        return dst
+    }
+
+    private fun pickPeaks(env: FloatArray, thr: FloatArray, refr: Int): IntArray {
+        val out = ArrayList<Int>()
+        var last = -1_000_000
+        var i = 1
+        while (i < env.size - 1) {
+            if (env[i] > thr[i] && env[i] >= env[i - 1] && env[i] >= env[i + 1]) {
+                if (i - last >= refr) {
+                    out.add(i)
+                    last = i
+                }
+            }
+            i++
+        }
+        return out.toIntArray()
     }
 }
