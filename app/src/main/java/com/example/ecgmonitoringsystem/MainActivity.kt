@@ -30,6 +30,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlin.math.min
+import androidx.compose.ui.res.stringResource
+import com.example.ecgmonitoringsystem.R
+
 
 class MainActivity : ComponentActivity() {
 
@@ -229,7 +232,7 @@ class MainActivity : ComponentActivity() {
         var showMarkers by remember { mutableStateOf(false) }
 
         Scaffold(
-            topBar = { TopAppBar(title = { Text("ECG Monitoring System") }) },
+            topBar = { TopAppBar(title = { Text(stringResource(R.string.app_name)) }) },
             bottomBar = {
                 Column(
                     Modifier.fillMaxWidth().padding(12.dp),
