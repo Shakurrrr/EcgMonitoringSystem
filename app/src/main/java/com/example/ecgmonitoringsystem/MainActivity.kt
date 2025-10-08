@@ -1,187 +1,252 @@
+@file:OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
+
 package com.example.ecgmonitoringsystem
 
-import android.Manifest
-import android.os.Build
 import android.os.Bundle
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.activity.viewModels
 import androidx.compose.foundation.layout.*
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.lifecycle.viewmodel.compose.viewModel
+import com.example.ecgmonitoringsystem.ble.BleUiState
+import com.example.ecgmonitoringsystem.export.EcgExport
 import com.example.ecgmonitoringsystem.ui.MainViewModel
 import com.example.ecgmonitoringsystem.ui.widgets.EcgCanvas
-import com.example.ecgmonitoringsystem.ui.widgets.EcgMarkers
+import kotlinx.coroutines.launch
 import kotlin.math.min
 
 class MainActivity : ComponentActivity() {
 
-    private val vm: MainViewModel by viewModels()
+    // Export launchers
+    private lateinit var createCsv: ActivityResultLauncher<String>
+    private lateinit var createPng: ActivityResultLauncher<String>
+    private lateinit var createPdf: ActivityResultLauncher<String>
 
-    private val permissionsLauncher = registerForActivityResult(
-        ActivityResultContracts.RequestMultiplePermissions()
-    ) { /* no-op */ }
+    // Helpers for exporters
+    private var currentVm: MainViewModel? = null
+    private var _samplesMv: FloatArray = floatArrayOf()
+    private var _fs: Int = 360
+    private var _gain: Float = 20f
+
+    private fun currentSamplesMv() = _samplesMv
+    private fun currentFs() = _fs
+    private fun currentGain() = _gain
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        requestBlePerms()
+
+        // SAF launchers
+        createCsv = registerForActivityResult(
+            ActivityResultContracts.CreateDocument("text/csv")
+        ) { uri ->
+            if (uri != null) {
+                val vm = currentVm ?: return@registerForActivityResult
+                lifecycleScope.launch {
+                    EcgExport.saveCsv(contentResolver, uri, vm.recordedFrames.value)
+                    EcgExport.share(this@MainActivity, uri, "text/csv")
+                }
+            }
+        }
+        createPng = registerForActivityResult(
+            ActivityResultContracts.CreateDocument("image/png")
+        ) { uri ->
+            if (uri != null) {
+                lifecycleScope.launch {
+                    EcgExport.savePng(
+                        contentResolver, uri,
+                        currentSamplesMv(), currentFs(), 10, currentGain()
+                    )
+                    EcgExport.share(this@MainActivity, uri, "image/png")
+                }
+            }
+        }
+        createPdf = registerForActivityResult(
+            ActivityResultContracts.CreateDocument("application/pdf")
+        ) { uri ->
+            if (uri != null) {
+                lifecycleScope.launch {
+                    EcgExport.savePdf(
+                        contentResolver, uri,
+                        currentSamplesMv(), currentFs(), 10, currentGain()
+                    )
+                    EcgExport.share(this@MainActivity, uri, "application/pdf")
+                }
+            }
+        }
 
         setContent {
             MaterialTheme {
-                Surface(Modifier.fillMaxSize()) {
+                MainScreen(
+                    onExportCsv = { createCsv.launch("ECG_${System.currentTimeMillis()}.csv") },
+                    onExportPng = { createPng.launch("ECG_${System.currentTimeMillis()}.png") },
+                    onExportPdf = { createPdf.launch("ECG_${System.currentTimeMillis()}.pdf") }
+                )
+            }
+        }
+    }
 
-                    // VM state
-                    val frame by vm.frame.collectAsState()
-                    val hr by vm.hr.collectAsState()
-                    val sqi by vm.sqi.collectAsState()
-                    val demo by vm.demoMode.collectAsState()
+    @Composable
+    private fun MainScreen(
+        onExportCsv: () -> Unit,
+        onExportPng: () -> Unit,
+        onExportPdf: () -> Unit
+    ) {
+        val vm: MainViewModel = viewModel()
+        currentVm = vm
 
-                    // UI state
-                    var showMarkers by remember { mutableStateOf(false) }
-                    var gainMmPerMv by remember { mutableStateOf(20f) } // default tall
-                    var amplitudeBoost by remember { mutableStateOf(1f) } // ±Amp controls
+        // ---- VM state ----
+        val bleState by vm.bleState.collectAsStateWithLifecycle()
+        val demo by vm.demoMode.collectAsStateWithLifecycle()
+        val rec by vm.isRecording.collectAsStateWithLifecycle()
+        val gainMmPerMv by vm.gainMmPerMv.collectAsStateWithLifecycle()
 
-                    // rolling buffers for display (mV)
-                    var ringFilt by remember { mutableStateOf(FloatArray(0)) }
-                    var fsRemember by remember { mutableStateOf(360) }
-                    var markers by remember { mutableStateOf<EcgMarkers?>(null) }
+        // Prefer VM’s rolling window if available
+        val traceMv by vm.traceMv.collectAsStateWithLifecycle()          // FloatArray (may be empty if not implemented)
+        val traceFs by vm.traceFs.collectAsStateWithLifecycle()          // Int
+        val seconds by vm.windowSeconds.collectAsStateWithLifecycle()     // Int
 
-                    // start demo so there’s a trace
-                    LaunchedEffect(Unit) {
-                        vm.enableDemo(true)
-                        vm.startStream(true, true)
-                    }
+        // Fallback inputs (frame path) if traceMv is empty
+        val frame by vm.frame.collectAsStateWithLifecycle()
+        val countsPerMv by vm.countsPerMv.collectAsStateWithLifecycle()
 
-                    Column(
-                        Modifier
-                            .padding(WindowInsets.systemBars.asPaddingValues())
-                            .padding(horizontal = 16.dp, vertical = 8.dp)
-                            .fillMaxSize()
-                    ) {
-                        // Top row
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            Button(
-                                onClick = { quickConnect() },
-                                modifier = Modifier.weight(1f),
-                                enabled = !demo
-                            ) { Text("Connect BLE") }
+        // ---------- Build a rolling window if VM doesn't supply one ----------
+        val fsFallback = frame?.fs ?: 360
+        val need = fsFallback * seconds
 
-                            Button(
-                                onClick = { vm.startStream(true, true) },
-                                modifier = Modifier.weight(1f)
-                            ) { Text("Start Demo") }
+        // Local ring buffer (only used if traceMv.isEmpty())
+        var ring by remember(fsFallback, seconds) { mutableStateOf(FloatArray(0)) }
 
-                            Button(
-                                onClick = { vm.startStream(false, true) },
-                                modifier = Modifier.weight(1f)
-                            ) { Text("Stop Demo") }
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        // Controls row (includes amplitude ±)
-                        Row(
-                            Modifier.fillMaxWidth(),
-                            horizontalArrangement = Arrangement.spacedBy(12.dp)
-                        ) {
-                            AssistChip(
-                                onClick = { vm.enableDemo(!demo) },
-                                label = { Text(if (demo) "Demo Mode: ON" else "Demo Mode: OFF") }
-                            )
-                            AssistChip(
-                                onClick = { showMarkers = !showMarkers },
-                                label = { Text(if (showMarkers) "Markers: ON" else "Markers: OFF") }
-                            )
-                            AssistChip(
-                                onClick = { /* no-op: info only */ },
-                                label = { Text("Gain: ${gainMmPerMv.toInt()} mm/mV") }
-                            )
-                            OutlinedButton(
-                                onClick = {
-                                    amplitudeBoost = (amplitudeBoost / 1.25f).coerceAtLeast(0.25f)
-                                }
-                            ) { Text("– Amp") }
-                            OutlinedButton(
-                                onClick = {
-                                    amplitudeBoost = (amplitudeBoost * 1.25f).coerceAtMost(4f)
-                                }
-                            ) { Text("+ Amp") }
-                        }
-
-                        Spacer(Modifier.height(8.dp))
-
-                        // HR/SQI line
-                        Text("HR: $hr bpm   SQI: $sqi")
-
-                        Spacer(Modifier.height(8.dp))
-
-                        // ---- Buffer update from VM frame ----
-                        LaunchedEffect(frame) {
-                            val fr = frame ?: return@LaunchedEffect
-                            fsRemember = fr.fs
-
-                            // Convert the VM's short[] (in µV or mV scale) to mV floats as before
-                            val maxKeep = fsRemember * 10
-                            val newBuf = FloatArray((ringFilt.size + fr.samples.size).coerceAtLeast(0))
-                            if (ringFilt.isNotEmpty()) {
-                                System.arraycopy(ringFilt, 0, newBuf, 0, ringFilt.size)
-                            }
-                            // Your pipeline: here I just map short -> mV (assuming 1000 units per mV)
-                            for (i in fr.samples.indices) {
-                                newBuf[ringFilt.size + i] = fr.samples[i] / 1000f
-                            }
-                            ringFilt = if (newBuf.size <= maxKeep) newBuf
-                            else newBuf.copyOfRange(newBuf.size - maxKeep, newBuf.size)
-
-                            // If you are already producing markers in your VM, assign them here:
-                            // markers = EcgMarkers(qrsIdx, pIdx, tIdx)
-                        }
-
-                        // ---- ECG canvas ----
-                        EcgCanvas(
-                            samplesMv = ringFilt,
-                            fs = fsRemember,
-                            seconds = 10,
-                            markers = markers,
-                            gainMmPerMv = gainMmPerMv,
-                            amplitudeBoost = amplitudeBoost,
-                            height = 300.dp,
-                            showMarkers = showMarkers
-                        )
-
-                        Text("SEQ: ${frame?.seq ?: -1}", style = MaterialTheme.typography.bodySmall)
+        LaunchedEffect(frame, countsPerMv, seconds) {
+            if (traceMv.isEmpty()) { // only maintain ring when VM doesn't provide rolling buffer
+                frame?.let { fr ->
+                    val incoming = FloatArray(fr.n) { i -> fr.samples[i].toFloat() / countsPerMv }
+                    ring = if (ring.isEmpty()) {
+                        if (incoming.size <= need) incoming
+                        else incoming.copyOfRange(incoming.size - need, incoming.size)
+                    } else {
+                        val out = FloatArray(min(ring.size + incoming.size, need))
+                        val keep = out.size - incoming.size
+                        if (keep > 0) System.arraycopy(ring, ring.size - keep, out, 0, keep)
+                        System.arraycopy(incoming, 0, out, keep, incoming.size)
+                        out
                     }
                 }
             }
         }
-    }
 
-    private fun requestBlePerms() {
-        val perms = buildList {
-            if (Build.VERSION.SDK_INT >= 31) {
-                add(Manifest.permission.BLUETOOTH_SCAN)
-                add(Manifest.permission.BLUETOOTH_CONNECT)
-            } else {
-                add(Manifest.permission.ACCESS_FINE_LOCATION)
-                add(Manifest.permission.BLUETOOTH)
-                add(Manifest.permission.BLUETOOTH_ADMIN)
-            }
-        }.toTypedArray()
-        permissionsLauncher.launch(perms)
-    }
-
-    private fun quickConnect() {
-        val adapter = android.bluetooth.BluetoothAdapter.getDefaultAdapter() ?: return
-        val device = adapter.bondedDevices?.firstOrNull {
-            val n = it.name ?: return@firstOrNull false
-            n.startsWith("ECG-AD8232") || n.startsWith("ECG")
+        // Choose source: VM trace if present, else ring
+        val rawSamplesForCanvas: FloatArray
+        val fsForCanvas: Int
+        if (traceMv.isNotEmpty()) {
+            rawSamplesForCanvas = traceMv
+            fsForCanvas = traceFs
+        } else {
+            rawSamplesForCanvas = ring
+            fsForCanvas = fsFallback
         }
-        device?.let { vm.connect(it) }
+
+        // ---------- DC-centering so the waveform sits on the midline ----------
+        val samplesMvCentered = remember(rawSamplesForCanvas) {
+            if (rawSamplesForCanvas.isEmpty()) rawSamplesForCanvas
+            else {
+                var mean = 0f
+                for (v in rawSamplesForCanvas) mean += v
+                mean /= rawSamplesForCanvas.size.toFloat()
+                FloatArray(rawSamplesForCanvas.size) { i -> rawSamplesForCanvas[i] - mean }
+            }
+        }
+
+        // Expose current data to exporters
+        _samplesMv = samplesMvCentered
+        _fs = fsForCanvas
+        _gain = gainMmPerMv
+
+        var showMarkers by remember { mutableStateOf(false) }
+
+        Scaffold(
+            topBar = { TopAppBar(title = { Text("ECG Monitoring System") }) },
+            bottomBar = {
+                Column(
+                    Modifier.fillMaxWidth().padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    // BLE + Demo + Recording controls
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        val connectLabel = when (bleState) {
+                            BleUiState.Disconnected -> "Connect BLE"
+                            BleUiState.Connecting   -> "Connecting…"
+                            is BleUiState.Connected -> "Disconnect BLE"
+                            is BleUiState.Error     -> "Retry Connect"
+                        }
+                        Button(
+                            onClick = {
+                                when (bleState) {
+                                    BleUiState.Disconnected, is BleUiState.Error -> vm.connect()
+                                    is BleUiState.Connected -> vm.disconnect()
+                                    BleUiState.Connecting -> Unit
+                                }
+                            },
+                            enabled = bleState !is BleUiState.Connecting,
+                            modifier = Modifier.weight(1f)
+                        ) { Text(connectLabel) }
+
+                        Button(
+                            onClick = { if (demo) vm.stopDemo() else vm.startDemo(360) },
+                            modifier = Modifier.weight(1f)
+                        ) { Text(if (demo) "Stop Demo" else "Start Demo") }
+
+                        Button(
+                            onClick = { if (rec) vm.stopRecording() else vm.startRecording() },
+                            modifier = Modifier.weight(1f),
+                            enabled = demo || (bleState is BleUiState.Connected)
+                        ) { Text(if (rec) "Stop Rec" else "Start Rec") }
+                    }
+
+                    // Gain / toggles
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        AssistChip(
+                            onClick = { showMarkers = !showMarkers },
+                            label = { Text("Markers: " + if (showMarkers) "ON" else "OFF") }
+                        )
+                        AssistChip(
+                            onClick = { /* optional change marker type */ },
+                            label = { Text("Gain: ${gainMmPerMv.toInt()} mm/mV") }
+                        )
+                        OutlinedButton(onClick = { vm.decGain() }) { Text("− Amp") }
+                        OutlinedButton(onClick = { vm.incGain() }) { Text("+ Amp") }
+                    }
+
+                    // Export buttons
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        OutlinedButton(onClick = onExportCsv, enabled = rec.not()) { Text("Export CSV") }
+                        OutlinedButton(onClick = onExportPng, enabled = samplesMvCentered.isNotEmpty()) { Text("Export PNG") }
+                        OutlinedButton(onClick = onExportPdf, enabled = samplesMvCentered.isNotEmpty()) { Text("Export PDF") }
+                    }
+                }
+            }
+        ) { pad ->
+            Column(Modifier.padding(pad).fillMaxSize(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                // ECG strip (uses your legacy canvas)
+                Card(Modifier.fillMaxWidth()) {
+                    EcgCanvas(
+                        samplesMv = samplesMvCentered, // centered rolling window
+                        fs = fsForCanvas,
+                        seconds = seconds,
+                        gainMmPerMv = gainMmPerMv,
+                        amplitudeBoost = 1f,
+                        height = 280.dp,
+                        showMarkers = showMarkers,
+                        markers = null
+                    )
+                }
+            }
+        }
     }
 }
