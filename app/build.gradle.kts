@@ -54,6 +54,15 @@ dependencies {
     implementation("androidx.compose.ui:ui-tooling-preview")
     debugImplementation("androidx.compose.ui:ui-tooling")
 
+    // Nordic BLE core – this is where BleManagerGattCallback is defined
+    implementation("no.nordicsemi.android:ble:2.6.1")
+
+    // Kotlin extensions for the library (nice-to-have)
+    implementation("no.nordicsemi.android:ble-ktx:2.6.1")
+
+    // Optional utilities
+    implementation("no.nordicsemi.android:log:2.3.0")
+    implementation("no.nordicsemi.android.support.v18:scanner:1.6.0")
     // Nordic BLE — ALL THREE (no duplicates)
     //implementation("no.nordicsemi.android:ble:2.6.1")
     //implementation("no.nordicsemi.android:ble-common:2.6.1")

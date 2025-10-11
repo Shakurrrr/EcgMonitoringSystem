@@ -1,117 +1,135 @@
 package com.example.ecgmonitoringsystem.ui
 
-import androidx.lifecycle.ViewModel
+import android.app.Application
+import android.bluetooth.BluetoothDevice
+import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import com.example.ecgmonitoringsystem.ble.BleUiState
+import com.example.ecgmonitoringsystem.ble.CardioScopeBleManager
 import com.example.ecgmonitoringsystem.data.DemoEcgSource
 import com.example.ecgmonitoringsystem.domain.model.EcgFrame
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
+import kotlin.math.min
 
-class MainViewModel : ViewModel() {
+class MainViewModel(app: Application) : AndroidViewModel(app) {
 
+    // ---- Demo path ----
     private val demo = DemoEcgSource(viewModelScope)
 
     private val _frame = MutableStateFlow<EcgFrame?>(null)
     val frame: StateFlow<EcgFrame?> = _frame.asStateFlow()
 
-    private val _bleState = MutableStateFlow<BleUiState>(BleUiState.Disconnected)
-    val bleState: StateFlow<BleUiState> = _bleState
-
-    // UI controls
     private val _demoMode = MutableStateFlow(false)
-    val demoMode: StateFlow<Boolean> = _demoMode
+    val demoMode = _demoMode.asStateFlow()
 
     private val _gainMmPerMv = MutableStateFlow(20f)
-    val gainMmPerMv: StateFlow<Float> = _gainMmPerMv
+    val gainMmPerMv = _gainMmPerMv.asStateFlow()
 
-    private val _speedMmPerSec = MutableStateFlow(25f)
-    val speedMmPerSec: StateFlow<Float> = _speedMmPerSec
-
-    private val _countsPerMv = MutableStateFlow(200f)
-    val countsPerMv: StateFlow<Float> = _countsPerMv
-
-    // Recording
     private val _isRecording = MutableStateFlow(false)
-    val isRecording: StateFlow<Boolean> = _isRecording
+    val isRecording = _isRecording.asStateFlow()
 
-    private val _recordedFrames = MutableStateFlow<List<EcgFrame>>(emptyList())
-    val recordedFrames: StateFlow<List<EcgFrame>> = _recordedFrames
-
-    // ===== NEW: rolling 10-second window in mV (continuous strip) =====
     private val _windowSeconds = MutableStateFlow(10)
-    val windowSeconds: StateFlow<Int> = _windowSeconds
+    val windowSeconds = _windowSeconds.asStateFlow()
 
-    private val _traceMv = MutableStateFlow(FloatArray(0))
-    val traceMv: StateFlow<FloatArray> = _traceMv
+    private val _countsPerMv = MutableStateFlow(200f) // update after calibration if needed
+    val countsPerMv = _countsPerMv.asStateFlow()
 
-    private val _traceFs = MutableStateFlow(360)
-    val traceFs: StateFlow<Int> = _traceFs
+    // ---- BLE state ----
+    private val _bleState = MutableStateFlow<BleUiState>(BleUiState.Disconnected)
+    val bleState = _bleState.asStateFlow()
 
-    init {
+    private var ble: CardioScopeBleManager? = null
+
+    // Live 3-lead traces in mV
+    private val _traceLead0 = MutableStateFlow(FloatArray(0))
+    val traceLead0 = _traceLead0.asStateFlow()
+    private val _traceLead1 = MutableStateFlow(FloatArray(0))
+    val traceLead1 = _traceLead1.asStateFlow()
+    private val _traceLead2 = MutableStateFlow(FloatArray(0))
+    val traceLead2 = _traceLead2.asStateFlow()
+
+    private val _leadIndex = MutableStateFlow(0)
+    val leadIndex = _leadIndex.asStateFlow()
+
+    fun selectLead(i: Int) { _leadIndex.value = i.coerceIn(0, 2) }
+
+    // ---- Demo control ----
+    fun startDemo(fs: Int = 360) {
+        if (_demoMode.value) return
+        _demoMode.value = true
+        demo.start(fs)
         viewModelScope.launch {
-            demo.frame.collect { fr ->
-                _frame.value = fr
-                if (fr != null) {
-                    // update trace Fs if changed
-                    if (_traceFs.value != fr.fs) _traceFs.value = fr.fs
+            demo.frame.collect { fr -> _frame.value = fr }
+        }
+    }
 
-                    // append new samples in mV
-                    val cps = _countsPerMv.value
-                    val incoming = FloatArray(fr.n) { i -> fr.samples[i].toFloat() / cps }
+    fun stopDemo() {
+        if (!_demoMode.value) return
+        _demoMode.value = false
+        demo.stop()
+        _frame.value = null
+    }
 
-                    val maxLen = _windowSeconds.value * fr.fs
-                    val old = _traceMv.value
-                    val merged = if (old.isEmpty()) incoming
-                    else FloatArray((old.size + incoming.size).coerceAtMost(maxLen)).also { out ->
-                        val takeOld = (out.size - incoming.size).coerceAtLeast(0)
-                        // keep tail of old
-                        if (takeOld > 0) {
-                            System.arraycopy(old, old.size - takeOld, out, 0, takeOld)
-                            System.arraycopy(incoming, 0, out, takeOld, incoming.size)
-                        } else {
-                            // incoming fully replaces window (when first filling)
-                            System.arraycopy(incoming, incoming.size - out.size, out, 0, out.size)
-                        }
-                    }
-                    _traceMv.value = merged
+    fun incGain(step: Float = 2f) { _gainMmPerMv.value = (_gainMmPerMv.value + step).coerceIn(5f, 40f) }
+    fun decGain(step: Float = 2f) { _gainMmPerMv.value = (_gainMmPerMv.value - step).coerceIn(5f, 40f) }
+    fun startRecording() { _isRecording.value = true }
+    fun stopRecording() { _isRecording.value = false }
 
-                    if (_isRecording.value) {
-                        _recordedFrames.value = _recordedFrames.value + fr
-                    }
-                }
+    // ---- BLE wiring from Activity ----
+    fun attachBleManager(manager: CardioScopeBleManager) {
+        if (ble != null) return
+        ble = manager
+        viewModelScope.launch {
+            manager.framesFlow.collect { fr ->
+                // Each frame has 3 leads (short counts). Convert to mV and append into 10s rings.
+                val fs = fr.fs
+                val need = fs * _windowSeconds.value
+                fun toMv(src: ShortArray) = FloatArray(src.size) { i -> src[i] / fr.countsPerMv }
+                updateRing(_traceLead0, toMv(fr.leads[0]), need)
+                updateRing(_traceLead1, toMv(fr.leads[1]), need)
+                updateRing(_traceLead2, toMv(fr.leads[2]), need)
+                _frame.value = null // stop demo feed when live data arrives
             }
         }
     }
 
-    // BLE
-    fun connect(address: String? = null) = viewModelScope.launch {
-        if (_bleState.value is BleUiState.Connected || _bleState.value is BleUiState.Connecting) return@launch
+    fun connectToDevice(device: BluetoothDevice) {
+        val mgr = ble ?: return
         _bleState.value = BleUiState.Connecting
-        try {
-            _bleState.value = BleUiState.Connected(null)
-        } catch (t: Throwable) {
-            _bleState.value = BleUiState.Error(t.message)
-        }
+        mgr.connect(device)
+            .useAutoConnect(false)
+            .retry(3, 100)
+            .timeout(15000)
+            .done { _bleState.value = BleUiState.Connected(device.name ?: device.address) }
+            .fail { _, status -> _bleState.value = BleUiState.Error("Connect failed ($status)") }
+            .enqueue()
     }
-    fun disconnect() = viewModelScope.launch { _bleState.value = BleUiState.Disconnected }
 
-    // Demo
-    fun startDemo(fs: Int = 360) { if (!_demoMode.value) { _demoMode.value = true; demo.start(fs) } }
-    fun stopDemo() { if (_demoMode.value) { _demoMode.value = false; demo.stop() } }
+    fun disconnect() {
+        ble?.disconnect()?.enqueue()
+        _bleState.value = BleUiState.Disconnected
+    }
 
-    // Controls
-    fun incGain(step: Float = 2f) { _gainMmPerMv.value = (_gainMmPerMv.value + step).coerceIn(5f, 60f) }
-    fun decGain(step: Float = 2f) { _gainMmPerMv.value = (_gainMmPerMv.value - step).coerceIn(5f, 60f) }
-    fun setWindowSeconds(s: Int) { _windowSeconds.value = s.coerceIn(5, 30) }
-    fun setCountsPerMv(v: Float) { _countsPerMv.value = v.coerceAtLeast(1f) }
+    private fun updateRing(dst: MutableStateFlow<FloatArray>, incoming: FloatArray, need: Int) {
+        val prev = dst.value
+        val out = if (prev.isEmpty()) {
+            if (incoming.size <= need) incoming else incoming.copyOfRange(incoming.size - need, incoming.size)
+        } else {
+            val merged = FloatArray(min(prev.size + incoming.size, need))
+            val keep = merged.size - incoming.size
+            if (keep > 0) System.arraycopy(prev, prev.size - keep, merged, 0, keep)
+            System.arraycopy(incoming, 0, merged, keep, incoming.size)
+            merged
+        }
+        dst.value = out
+    }
 
-    // Recording
-    fun startRecording() { _isRecording.value = true; _recordedFrames.value = emptyList() }
-    fun stopRecording() { _isRecording.value = false }
-    fun clearRecording() { _recordedFrames.value = emptyList() }
-
-    override fun onCleared() { demo.stop(); super.onCleared() }
+    override fun onCleared() {
+        demo.stop()
+        ble?.disconnect()?.enqueue()
+        super.onCleared()
+    }
 }

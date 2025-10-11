@@ -2,26 +2,32 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- BLE capability -->
-    <uses-feature
-        android:name="android.hardware.bluetooth_le"
-        android:required="true" />
+    <!-- Hardware capabilities -->
+    <uses-feature android:name="android.hardware.bluetooth" android:required="true" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
 
-    <!-- Android 12+ (API 31+) permissions -->
+    <!-- Android 12+ (API 31+) -->
     <uses-permission
         android:name="android.permission.BLUETOOTH_SCAN"
         android:usesPermissionFlags="neverForLocation" />
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <!-- Only if you plan to advertise (peripheral role). Safe to keep; ignored if unused. -->
+    <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
 
-    <!-- Back-compat for API 30 and below -->
+    <!-- Back-compat for API <= 30 -->
     <uses-permission
         android:name="android.permission.BLUETOOTH"
         android:maxSdkVersion="30" />
     <uses-permission
         android:name="android.permission.BLUETOOTH_ADMIN"
         android:maxSdkVersion="30" />
+    <!-- Required for scanning on API 23–30 -->
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
+        android:maxSdkVersion="30" />
+    <!-- Optional: some OEMs still check coarse on old APIs -->
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
         android:maxSdkVersion="30" />
 
     <application
@@ -35,7 +41,6 @@
         android:theme="@style/Theme.ECGMonitoringSystem"
         tools:targetApi="31">
 
-        <!-- Main activity -->
         <activity
             android:name=".MainActivity"
             android:exported="true">
@@ -45,10 +50,9 @@
             </intent-filter>
         </activity>
 
-        <!-- Optional legacy HTTP lib (usually not needed) -->
+        <!-- Keep only if you actually need it; otherwise remove -->
         <uses-library
             android:name="org.apache.http.legacy"
             android:required="false" />
     </application>
-
 </manifest>

@@ -1,4 +1,4 @@
-// settings.gradle.kts — add JitPack so MPAndroidChart resolves
+// settings.gradle.kts
 
 pluginManagement {
     repositories {
@@ -11,7 +11,9 @@ pluginManagement {
         }
         mavenCentral()
         gradlePluginPortal()
-        maven("https://jitpack.io") // <-- added
+        // JitPack is rarely needed for plugins, so we keep it last and empty (or remove).
+        // If you ever need a plugin from JitPack, add a proper content filter here.
+        // maven("https://jitpack.io")
     }
 }
 
@@ -20,9 +22,16 @@ dependencyResolutionManagement {
     repositories {
         google()
         mavenCentral()
-        maven("https://jitpack.io") // <-- added
+
+        // JitPack LAST and narrowly scoped to MPAndroidChart only
+        maven("https://jitpack.io") {
+            content {
+                includeGroup("com.github.PhilJay") // MPAndroidChart
+                // Add other JitPack-only groups here if you explicitly need them
+            }
+        }
     }
 }
 
-rootProject.name = "ECGMonitoringSystem" // no space is safer
+rootProject.name = "CardioScope"
 include(":app")
